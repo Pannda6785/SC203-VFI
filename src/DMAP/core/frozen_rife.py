@@ -6,7 +6,7 @@ import torch
 import torch.nn as nn
 
 # RIFE-VFI root (adjust if your layout differs)
-RIFE_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "RIFE-VFI"))
+RIFE_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "RIFE"))
 if RIFE_ROOT not in sys.path:
     sys.path.append(RIFE_ROOT)
 
