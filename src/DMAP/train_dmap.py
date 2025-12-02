@@ -30,8 +30,10 @@ def parse_args():
         "--rife_model_dir",
         type=str,
         required=True,
-        help="Path to RIFE model directory (modelDir used in original RIFE scripts, "
-             "must contain flownet.pkl for the chosen variant)",
+        help=(
+            "Path to RIFE model directory (modelDir used in original RIFE scripts, "
+            "must contain flownet.pkl for the chosen variant)"
+        ),
     )
 
     parser.add_argument(
@@ -48,7 +50,7 @@ def parse_args():
         "--error-threshold",
         type=float,
         default=0.3,
-        help="Threshold t for error mask M_e",
+        help="Threshold t for error mask M_e (see Eq. (4) in paper)",
     )
     parser.add_argument("--lambda-e", type=float, default=1.0)
     parser.add_argument("--lambda-d", type=float, default=5.0)
@@ -119,6 +121,14 @@ def make_dataloaders(args):
     return train_loader, val_loader
 
 
+def charbonnier_loss(x: torch.Tensor, eps: float = 1e-3) -> torch.Tensor:
+    """
+    Charbonnier loss Φ(x) = sqrt(x^2 + eps^2), averaged over all elements.
+    Used as a smooth L1 for LVFI (and optionally Le if you want).
+    """
+    return torch.mean(torch.sqrt(x * x + eps * eps))
+
+
 def validate(model_E, model_F, val_loader, error_t: float):
     """
     Validation: just L1 between blended output and GT, to track quality.
@@ -145,9 +155,10 @@ def validate(model_E, model_F, val_loader, error_t: float):
             logits_D = model_E(I0, I1, I2, I3, I_c, M_c)
             D = torch.sigmoid(logits_D)
 
-            # Blend
+            # Blend discontinuous (I1) and continuous (Ic) pixels
             I_out = blend_with_dmap(I1, I_c, D)
 
+            # plain L1 for reporting
             l1 = (I_out - I_gt).abs().mean()
             b = I_gt.shape[0]
 
@@ -171,13 +182,13 @@ def main():
     print(f"[train_dmap] Using device: {device}")
 
     # D-map estimator on same device
-    model_E = DMapEstimator(base_channels=32, num_blocks=4).to(device)
+    model_E = DMapEstimator(base_channels=32, num_res_blocks=4).to(device)
 
-    # Optimizer & scheduler
+    # Optimizer & scheduler (Adamax + StepLR, as in paper)
     optimizer = optim.Adamax(model_E.parameters(), lr=args.lr)
     scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=2, gamma=0.5)
 
-    # Losses
+    # D-map supervision loss: BCE(D, D_gt)
     bce = torch.nn.BCEWithLogitsLoss()
 
     best_val = float("inf")
@@ -202,7 +213,7 @@ def main():
             I_gt = batch["I_gt"].to(device)
             D_gt = batch["D_gt"].to(device)
 
-            # 1) frozen RIFE interpolation + ECG
+            # 1) frozen RIFE interpolation + ECG (no gradients)
             with torch.no_grad():
                 I_c = model_F(I1, I2)
                 M_c = compute_coherence_map(model_F, I0, I1, I2, I3)
@@ -211,15 +222,23 @@ def main():
             logits_D = model_E(I0, I1, I2, I3, I_c, M_c)
             D = torch.sigmoid(logits_D)
 
-            # 3) Blending
+            # 3) Blending (Eq. (1) in paper)
             I_out = blend_with_dmap(I1, I_c, D)
 
             # 4) Losses
-            L_vfi = (I_out - I_gt).abs().mean()  # L1 reconstruction
+            # LVFI: Charbonnier between blended output and GT
+            diff = I_out - I_gt
+            L_vfi = charbonnier_loss(diff)
+
+            # Pixel-wise discontinuity loss Le:
+            # uses error mask Me = |Ic - IGT| >= t (see Eq. (4),(5))
             M_e = compute_error_mask(I_c, I_gt, t=args.error_threshold)
             L_e = pixelwise_discontinuity_loss(I_out, I_gt, M_e)
-            L_D = bce(logits_D, D_gt)  # BCE on D-map vs synthetic GT
 
+            # D-map supervision loss (FTM+ mask)
+            L_D = bce(logits_D, D_gt)
+
+            # total loss (Eq. (6))
             loss = L_vfi + args.lambda_e * L_e + args.lambda_d * L_D
 
             optimizer.zero_grad()
@@ -252,7 +271,7 @@ def main():
             f"ETA~{est_remaining/60:.2f} min"
         )
 
-        # Save best model by val L1
+        # Save best model by val L1 (lower is better)
         if val_l1 < best_val:
             best_val = val_l1
             ckpt_path = os.path.join(args.save_dir, "dmap_estimator_best.pth")
