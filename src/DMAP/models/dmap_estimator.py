@@ -79,6 +79,64 @@ class FrameEncoder(nn.Module):
         x = self.pool(x)
         return x
 
+class NoOpAttentionBlock(nn.Module):
+    """Cross-attention disabled: simply returns x unchanged."""
+    def __init__(self, channels):
+        super().__init__()
+        self.channels = channels
+
+    def forward(self, x, c):
+        return x
+
+class DownsampledAttentionBlock(nn.Module):
+    """
+    Multi-head attention applied on a coarse spatial grid.
+    Uses avg-pooling -> MHA -> upsample -> sigmoid gate.
+    Much cheaper than full MHA.
+    """
+    def __init__(self, channels, num_heads=4, ds_factor=8):
+        super().__init__()
+        assert channels % num_heads == 0
+        self.attn = nn.MultiheadAttention(
+            embed_dim=channels,
+            num_heads=num_heads,
+            batch_first=True
+        )
+        self.norm_q = nn.LayerNorm(channels)
+        self.norm_kv = nn.LayerNorm(channels)
+        self.ds_factor = ds_factor
+
+    def forward(self, x, c):
+        import torch.nn.functional as F
+        b, ch, h, w = x.shape
+        f = self.ds_factor
+
+        if f > 1:
+            x_ds = F.avg_pool2d(x, kernel_size=f, stride=f)
+            c_ds = F.avg_pool2d(c, kernel_size=f, stride=f)
+        else:
+            x_ds, c_ds = x, c
+
+        b2, ch2, h2, w2 = x_ds.shape
+        N = h2 * w2
+
+        q = x_ds.flatten(2).transpose(1, 2)
+        k = c_ds.flatten(2).transpose(1, 2)
+        v = k
+
+        q = self.norm_q(q)
+        k = self.norm_kv(k)
+        v = self.norm_kv(v)
+
+        att, _ = self.attn(q, k, v)
+        att = att.transpose(1, 2).reshape(b2, ch2, h2, w2)
+
+        gate = torch.sigmoid(
+            F.interpolate(att, size=(h, w), mode="bilinear", align_corners=False)
+        )
+
+        return x * gate
+
 
 class CrossAttentionBlock(nn.Module):
     """
@@ -134,12 +192,10 @@ class DMapEstimator(nn.Module):
     Output:
       logits for D-map    : [B,1,H,W] (BCEWithLogitsLoss outside)
     """
-    def __init__(
-        self,
-        base_channels: int = 32,
-        num_res_blocks: int = 4,
-        num_heads: int = 4,
-    ):
+    def __init__(self,
+             base_channels: int = 32,
+             num_res_blocks: int = 4,
+             attention_mode: str = "down"):
         super().__init__()
 
         C = base_channels
@@ -147,9 +203,16 @@ class DMapEstimator(nn.Module):
         # ----- Extraction module -----
         self.encoder = FrameEncoder(in_ch=3, out_ch=C)
 
-        # attention between adjacent frames (I1, I2) and Ic
-        self.attn_1 = CrossAttentionBlock(C, num_heads=num_heads)
-        self.attn_2 = CrossAttentionBlock(C, num_heads=num_heads)
+        # choose based on attention_mode
+        if attention_mode == "none":
+            AttnBlock = lambda: NoOpAttentionBlock(C)
+        elif attention_mode == "down":
+            AttnBlock = lambda: DownsampledAttentionBlock(C, num_heads=4, ds_factor=8)
+        else:
+            raise ValueError(f"Unknown attention_mode: {attention_mode}")
+
+        self.attn_1 = AttnBlock()
+        self.attn_2 = AttnBlock()
 
         # concat [I0, att(I1), att(I2), I3] -> Conv2d
         self.conv_concat_neighbors = nn.Conv2d(4 * C, 2 * C, kernel_size=3, padding=1, bias=True)

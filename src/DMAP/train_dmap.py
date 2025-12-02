@@ -76,6 +76,14 @@ def parse_args():
     )
     parser.add_argument("--save-dir", type=str, default="./checkpoints")
 
+    parser.add_argument(
+        "--attention-mode",
+        type=str,
+        default="down",
+        choices=["none", "down"],
+        help="Cross-attention mode: 'none' = disabled, 'down' = downsampled MHA",
+    )
+
     return parser.parse_args()
 
 
@@ -182,7 +190,11 @@ def main():
     print(f"[train_dmap] Using device: {device}")
 
     # D-map estimator on same device
-    model_E = DMapEstimator(base_channels=32, num_res_blocks=4).to(device)
+    model_E = DMapEstimator(
+        base_channels=32,
+        num_res_blocks=4,
+        attention_mode=args.attention_mode
+    ).to(device)
 
     # Optimizer & scheduler (Adamax + StepLR, as in paper)
     optimizer = optim.Adamax(model_E.parameters(), lr=args.lr)
