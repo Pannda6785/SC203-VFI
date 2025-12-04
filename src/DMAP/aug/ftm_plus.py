@@ -16,7 +16,7 @@ def _draw_random_shape_mask(w: int, h: int) -> Image.Image:
     mask = Image.new("L", (w, h), 0)
     draw = ImageDraw.Draw(mask)
 
-    shape_type = random.choice(["rect", "ellipse", "polygon", "line", "arc"])
+    shape_type = random.choice(["rect", "ellipse", "rect", "ellipse", "rect", "ellipse", "polygon", "line", "arc"])
 
     # random bounding box
     x1 = random.randint(0, w - 1)
@@ -24,8 +24,8 @@ def _draw_random_shape_mask(w: int, h: int) -> Image.Image:
     x2 = random.randint(x1 + 1, min(w, x1 + random.randint(10, max(10, w // 2))))
     y2 = random.randint(y1 + 1, min(h, y1 + random.randint(10, max(10, h // 2))))
 
-    alpha = random.randint(100, 255)
-    thickness = random.randint(1, 6)
+    alpha = random.randint(160, 255)
+    thickness = random.randint(2, 3)
 
     if shape_type == "rect":
         if random.random() < 0.5:
@@ -42,7 +42,7 @@ def _draw_random_shape_mask(w: int, h: int) -> Image.Image:
     elif shape_type == "polygon":
         pts = [
             (random.randint(0, w - 1), random.randint(0, h - 1))
-            for _ in range(random.randint(3, 7))
+            for _ in range(random.randint(3, 6))
         ]
         if random.random() < 0.5:
             draw.polygon(pts, fill=alpha)
