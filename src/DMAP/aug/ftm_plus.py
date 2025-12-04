@@ -2,7 +2,7 @@ import random
 from typing import Tuple
 
 from PIL import Image, ImageDraw, ImageChops
-import numpy as np
+
 
 # -------------------------
 # Shape / text mask helpers
@@ -11,7 +11,7 @@ import numpy as np
 def _draw_random_shape_mask(w: int, h: int) -> Image.Image:
     """
     Draw one random "figure" shape (rect, ellipse, polygon, line, arc)
-    into an 'L' mask in [0,255].
+    into an 'L' mask in [0,255], where values represent alpha.
     """
     mask = Image.new("L", (w, h), 0)
     draw = ImageDraw.Draw(mask)
@@ -65,8 +65,8 @@ def _draw_random_shape_mask(w: int, h: int) -> Image.Image:
 
 def _draw_random_text_mask(w: int, h: int) -> Image.Image:
     """
-    Draw a random "text-like" blob in an 'L' mask.
-    This approximates watermark / chat overlay regions.
+    Draw a random "text-like" mask in 'L' mode, where non-zero values
+    follow the text glyph shape (not just the bounding box).
     """
     mask = Image.new("L", (w, h), 0)
     draw = ImageDraw.Draw(mask)
@@ -81,6 +81,8 @@ def _draw_random_text_mask(w: int, h: int) -> Image.Image:
     y = random.randint(0, max(0, h - text_h))
 
     alpha = random.randint(120, 255)
+
+    # Background stays zero; only text glyphs are non-zero (alpha)
     draw.rectangle([x, y, x + text_w, y + text_h], fill=0)
     draw.text((x, y), text, fill=alpha)
 
@@ -89,8 +91,8 @@ def _draw_random_text_mask(w: int, h: int) -> Image.Image:
 
 def _build_ftm_mask(w: int, h: int, mode: str = "figure") -> Image.Image:
     """
-    Build a combined mask by layering several random shapes or text blocks.
-    This corresponds to FTM+ (polygons, ellipses, irregular lines, etc.).
+    Build a combined FTM+ mask by layering several random shapes or text blocks.
+    The mask is in 'L' with values representing alpha.
     """
     num_layers = random.randint(1, 4)
     total = Image.new("L", (w, h), 0)
@@ -112,11 +114,11 @@ def _apply_mask_to_frame(
     """
     Blend a random color into `frame` using `mask` as alpha.
 
-    alpha_factor in (0,1] -> partial transparency
-    mask: 'L' image in [0,255]
+    - alpha_factor in (0,1] scales the mask intensity for blending
+    - mask: 'L' image in [0,255] (we do NOT modify mask itself for D_gt)
     """
     if alpha_factor is None:
-        alpha_factor = random.uniform(0.3, 1.0)  # encourage intermediate D_map
+        alpha_factor = random.uniform(0.6, 1.0)
     if color is None:
         color = tuple(random.randint(0, 255) for _ in range(3))
 
@@ -124,7 +126,7 @@ def _apply_mask_to_frame(
     frame_rgba = frame.convert("RGBA")
     overlay = Image.new("RGBA", (w, h), color + (255,))
 
-    # scale mask intensities by alpha_factor
+    # scale mask intensities by alpha_factor ONLY for blending
     mask_scaled = mask.point(lambda v: int(v * alpha_factor))
     out = Image.composite(overlay, frame_rgba, mask_scaled)
     return out.convert("RGB")
@@ -143,15 +145,15 @@ def apply_ftm_plus(I0, I1, I_gt, I2, I3, p_augment: float = 0.75):
         * Text Mixing (TM)         -> static / appear / disappear / moving text
         * Scene-change-like (FTM+) -> full-frame overlays for discontinuities
     - Uses polygons, ellipses, lines, arcs, etc.
-    - Uses alpha in (0,1] so the D_map has intermediate values.
 
     Returns:
         I0', I1', I_gt', I2', I3', D_gt
 
     where:
         - frames are PIL RGB images (possibly augmented)
-        - D_gt is PIL 'L' image in [0,255], proportional to
-          the per-pixel difference between ORIGINAL I_gt and AUGMENTED I_gt.
+        - D_gt is a PIL 'L' image in [0,255] that:
+            * has the SAME SHAPE as the overlay on I_gt
+            * and its values equal the mask alpha (independent of RGB diff and color)
     """
 
     # With probability (1 - p_augment): no FTM/FTM+, only flips/crops.
@@ -169,34 +171,39 @@ def apply_ftm_plus(I0, I1, I_gt, I2, I3, p_augment: float = 0.75):
     # 2) Choose temporal pattern (TM patterns follow paper's four cases)
     if aug_family == "figure":
         # Figure Mixing: static figure on all frames
-        pattern = [1, 1, 1, 1, 1]
+        pattern = random.choice([
+            [1, 1, 1, 1, 1],  # 1) static UI
+            [0, 0, 0, 1, 1],  # 2) appears (not in prev, appears in future)
+            [1, 1, 1, 0, 0],  # 3) disappears
+        ])
 
     elif aug_family == "scene":
         # Crude scene-change-like patterns: entire later/earlier frames overlaid
         pattern = random.choice([
-            [0, 0, 1, 1, 1],  # scene changes around/after GT
+            [0, 0, 0, 1, 1],  # scene changes around/after GT
             [1, 1, 1, 0, 0],  # scene changes before GT
         ])
 
     else:  # "text" -> Text Mixing cases 1–4 (+ one extra moving version)
         pattern = random.choice([
             [1, 1, 1, 1, 1],  # 1) static text
-            [0, 0, 1, 1, 1],  # 2) appears (not in prev, appears in future)
+            [0, 0, 0, 1, 1],  # 2) appears (not in prev, appears in future)
             [1, 1, 1, 0, 0],  # 3) disappears
-            [0, 1, 1, 0, 0],  # 4) only around GT
-            [0, 1, 1, 0, 1],  # extra "moving" pattern
         ])
 
     # 3) Build a base mask for this augmentation type
     if aug_family == "scene":
-        # full-frame mask to simulate hard scene changes
+        # full-frame mask to simulate hard scene changes (with some alpha)
         base_mask = Image.new("L", (w, h), random.randint(180, 255))
     else:
         mode = "text" if aug_family == "text" else "figure"
         base_mask = _build_ftm_mask(w, h, mode=mode)
 
-    # 4) Apply to each frame according to the temporal pattern
+    # 4) Apply to each frame according to the temporal pattern.
+    #    Also record the EXACT mask used on I_gt (index 2) for D_gt.
     aug_frames = []
+    mask_gt = Image.new("L", (w, h), 0)  # fallback: no overlay on GT
+
     for i, f in enumerate(frames):
         if pattern[i]:
             mask = base_mask
@@ -210,27 +217,18 @@ def apply_ftm_plus(I0, I1, I_gt, I2, I3, p_augment: float = 0.75):
                 translated.paste(base_mask, (dx, dy))
                 mask = translated
 
+            # If this is the GT frame, remember the mask we actually used.
+            if i == 2:  # index of I_gt
+                mask_gt = mask.copy()
+
             aug_frames.append(_apply_mask_to_frame(f, mask))
         else:
             aug_frames.append(f)
 
     I0_aug, I1_aug, I_gt_aug, I2_aug, I3_aug = aug_frames
 
-    # 5) Build D_gt as the DIFFERENCE MAP between original and augmented GT
-    #    (this is what the paper uses for supervision).
-    gt_orig = np.array(I_gt, dtype=np.float32)     # H,W,3
-    gt_aug = np.array(I_gt_aug, dtype=np.float32)  # H,W,3
-
-    diff = np.abs(gt_aug - gt_orig).mean(axis=2)   # H,W, average over channels
-
-    if diff.max() > 0:
-        diff_norm = diff / diff.max()              # [0,1]
-    else:
-        diff_norm = diff                           # all zeros
-
-    D_gt = Image.fromarray(
-        np.clip(diff_norm * 255.0, 0, 255).astype(np.uint8),
-        mode="L",
-    )
+    # 5) D_gt is simply the mask used on I_gt:
+    #    same shape as the overlay, values = alpha (0–255), independent of RGB diff.
+    D_gt = mask_gt
 
     return I0_aug, I1_aug, I_gt_aug, I2_aug, I3_aug, D_gt

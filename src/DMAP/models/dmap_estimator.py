@@ -42,7 +42,6 @@ class CBAMBlock(nn.Module):
 
         return x
 
-
 class ResBlock(nn.Module):
     """
     Simple residual block: Conv-ReLU-Conv + skip.
@@ -61,7 +60,6 @@ class ResBlock(nn.Module):
         out = out + identity
         out = self.relu(out)
         return out
-
 
 class FrameEncoder(nn.Module):
     """
@@ -137,7 +135,6 @@ class DownsampledAttentionBlock(nn.Module):
 
         return x * gate
 
-
 class CrossAttentionBlock(nn.Module):
     """
     Multi-head attention between a frame feature and Ic feature.
@@ -194,7 +191,7 @@ class DMapEstimator(nn.Module):
     """
     def __init__(self,
              base_channels: int = 32,
-             num_res_blocks: int = 4,
+             num_res_blocks: int = 6,
              attention_mode: str = "down"):
         super().__init__()
 
@@ -208,6 +205,8 @@ class DMapEstimator(nn.Module):
             AttnBlock = lambda: NoOpAttentionBlock(C)
         elif attention_mode == "down":
             AttnBlock = lambda: DownsampledAttentionBlock(C, num_heads=4, ds_factor=8)
+        elif attention_mode == "full":
+            AttnBlock = lambda: CrossAttentionBlock(C, num_heads=4)
         else:
             raise ValueError(f"Unknown attention_mode: {attention_mode}")
 
@@ -226,6 +225,7 @@ class DMapEstimator(nn.Module):
         self.cbam2 = CBAMBlock(4 * C)
         self.fuse_conv2 = nn.Conv2d(4 * C, 4 * C, kernel_size=3, padding=1, bias=True)
         self.fuse_conv3 = nn.Conv2d(4 * C, 4 * C, kernel_size=3, padding=1, bias=True)
+        self.fuse_conv4 = nn.Conv2d(4 * C, 4 * C, kernel_size=3, padding=1, bias=True)
 
         self.res_blocks = nn.Sequential(
             *[ResBlock(4 * C) for _ in range(num_res_blocks)]
@@ -272,8 +272,8 @@ class DMapEstimator(nn.Module):
             )
             x = x * M_c_ds  # filter out continuous regions
 
-        # Save for global residual connection (Fig. 4, long skip)
-        residual = x
+        # Save for global residual connection
+        residual = fc
 
         # ----- Fusion module -----
         x = F.relu(self.fuse_conv1(x), inplace=True)
@@ -281,6 +281,7 @@ class DMapEstimator(nn.Module):
         x = self.cbam2(x)
         x = F.relu(self.fuse_conv2(x), inplace=True)
         x = F.relu(self.fuse_conv3(x), inplace=True)
+        x = F.relu(self.fuse_conv4(x), inplace=True)
         x = self.res_blocks(x)
 
         # global residual
