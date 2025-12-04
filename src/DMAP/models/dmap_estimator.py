@@ -276,7 +276,7 @@ class DMapEstimator(nn.Module):
             x = x * M_c_ds  # filter out continuous regions
 
         # Save for global residual connection
-        residual = fc
+        residual = self.proj_fc(fc)  # [B, 4C, H/2, W/2]
 
         # ----- Fusion module -----
         x = F.relu(self.fuse_conv1(x), inplace=True)
@@ -288,7 +288,7 @@ class DMapEstimator(nn.Module):
         x = self.res_blocks(x)
 
         # global residual
-        residual = self.proj_fc(fc)  # [B, 4C, H/2, W/2]
+        x = x + residual
 
         # low-resolution logits
         logits_low = self.conv_out_lowres(x)            # [B,1,H/2,W/2]
