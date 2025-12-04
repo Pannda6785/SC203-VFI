@@ -80,8 +80,8 @@ def parse_args():
         "--attention-mode",
         type=str,
         default="down",
-        choices=["none", "down"],
-        help="Cross-attention mode: 'none' = disabled, 'down' = downsampled MHA",
+        choices=["none", "down", "full"],
+        help="Cross-attention mode: 'none' = disabled, 'down' = downsampled MHA, 'full' = CrossMHA"
     )
 
     return parser.parse_args()

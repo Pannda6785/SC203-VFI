@@ -234,6 +234,9 @@ class DMapEstimator(nn.Module):
         # final 1x1-ish conv to get 1-channel logits
         self.conv_out_lowres = nn.Conv2d(4 * C, 1, kernel_size=3, padding=1, bias=True)
 
+        self.proj_fc = nn.Conv2d(C, 4 * C, kernel_size=1, bias=True)
+
+
     def forward(self, I0, I1, I2, I3, I_c, M_c):
         """
         I0..I3, I_c : [B,3,H,W]
@@ -285,7 +288,7 @@ class DMapEstimator(nn.Module):
         x = self.res_blocks(x)
 
         # global residual
-        x = x + residual
+        residual = self.proj_fc(fc)  # [B, 4C, H/2, W/2]
 
         # low-resolution logits
         logits_low = self.conv_out_lowres(x)            # [B,1,H/2,W/2]
