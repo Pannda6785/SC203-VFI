@@ -254,7 +254,7 @@ def main():
             L_e = pixelwise_discontinuity_loss(I_out, I_gt, M_e)
 
             # D-map supervision loss (FTM+ mask)
-            L_D = bce(D, D_gt)
+            L_D = bce(D * 255.0, D_gt)
 
             # total loss (Eq. (6))
             loss = args.lambda_e * L_e + args.lambda_d * L_D
