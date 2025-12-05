@@ -16,6 +16,8 @@ from core.dmap_utils import (
     pixelwise_discontinuity_loss,
 )
 
+from models.res import DiscontinuityRefinementNet, structural_similarity_torch 
+
 
 def parse_args():
     parser = argparse.ArgumentParser("Train D-map estimator on Vimeo-90K")
@@ -80,8 +82,8 @@ def parse_args():
         "--attention-mode",
         type=str,
         default="down",
-        choices=["none", "down", "full"],
-        help="Cross-attention mode: 'none' = disabled, 'down' = downsampled MHA, 'full' = CrossMHA"
+        choices=["none", "down"],
+        help="Cross-attention mode: 'none' = disabled, 'down' = downsampled MHA",
     )
 
     return parser.parse_args()
@@ -157,11 +159,14 @@ def validate(model_E, model_F, val_loader, error_t: float):
 
             # Baseline interpolation and ECG
             I_c = model_F(I1, I2)
-            M_c = compute_coherence_map(model_F, I0, I1, I2, I3)
 
             # D-map prediction
-            logits_D = model_E(I0, I1, I2, I3, I_c, M_c)
-            D = torch.sigmoid(logits_D)
+            # logits_D = model_E(I0, I1, I2, I3, I_c, M_c)
+            # D = torch.sigmoid(logits_D)
+            with torch.no_grad():
+                coarse_mask = structural_similarity_torch(I1 * 255.0, I2 * 255.0, data_range=255).unsqueeze(1)
+
+            D = model_E(I1, I2, I_c, coarse_mask)
 
             # Blend discontinuous (I1) and continuous (Ic) pixels
             I_out = blend_with_dmap(I1, I_c, D)
@@ -190,11 +195,13 @@ def main():
     print(f"[train_dmap] Using device: {device}")
 
     # D-map estimator on same device
-    model_E = DMapEstimator(
-        base_channels=32,
-        num_res_blocks=4,
-        attention_mode=args.attention_mode
-    ).to(device)
+    # model_E = DMapEstimator(
+    #     base_channels=32,
+    #     num_res_blocks=4,
+    #     attention_mode=args.attention_mode
+    # ).to(device)
+
+    model_E = DiscontinuityRefinementNet().to(device)
 
     # Optimizer & scheduler (Adamax + StepLR, as in paper)
     optimizer = optim.Adamax(model_E.parameters(), lr=args.lr)
@@ -228,11 +235,10 @@ def main():
             # 1) frozen RIFE interpolation + ECG (no gradients)
             with torch.no_grad():
                 I_c = model_F(I1, I2)
-                M_c = compute_coherence_map(model_F, I0, I1, I2, I3)
+                coarse_mask = structural_similarity_torch(I1 * 255.0, I2 * 255.0, data_range=255).unsqueeze(1)
 
             # 2) D-map prediction
-            logits_D = model_E(I0, I1, I2, I3, I_c, M_c)
-            D = torch.sigmoid(logits_D)
+            D = model_E(I1 ,I2, I_c, coarse_mask)
 
             # 3) Blending (Eq. (1) in paper)
             I_out = blend_with_dmap(I1, I_c, D)
@@ -248,10 +254,10 @@ def main():
             L_e = pixelwise_discontinuity_loss(I_out, I_gt, M_e)
 
             # D-map supervision loss (FTM+ mask)
-            L_D = bce(logits_D, D_gt)
+            L_D = bce(D, D_gt)
 
             # total loss (Eq. (6))
-            loss = L_vfi + args.lambda_e * L_e + args.lambda_d * L_D
+            loss = args.lambda_e * L_e + args.lambda_d * L_D
 
             optimizer.zero_grad()
             loss.backward()
